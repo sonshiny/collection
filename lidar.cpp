@@ -18,6 +18,19 @@ ros::Publisher pub;
 ros::Publisher pub2;
 ros::Publisher pub_custom;
 
+struct objif{
+    pcl::PointIndices* objPoints;
+    float core_x;
+    float core_y;
+    float core_z;
+    float xMin;
+    float yMin;
+    float zMin;
+    float xMax;
+    float yMax;
+    float zMax;
+}
+
 // ROI 필터링
 void ROI(pcl::PointCloud<pcl::PointXYZ>::Ptr sky, pcl::PointCloud<pcl::PointXYZ>::Ptr sky2) {
     for (int i = 0; i < sky->points.size(); i++) {
@@ -105,7 +118,7 @@ void normalVectorFiltering(pcl::PointCloud<pcl::PointXYZ>::Ptr sky4, pcl::PointC
     }
 }
 
-void clustering(pcl::PointCloud<pcl::PointXYZ>::Ptr sky5, pcl::PointCloud<pcl::PointXYZ>::Ptr sky6,std::vector<std::vector<float>> &pop,pcl::PointCloud<pcl::PointXYZ>::Ptr sky8){
+void clustering(pcl::PointCloud<pcl::PointXYZ>::Ptr sky5, pcl::PointCloud<pcl::PointXYZ>::Ptr sky6,std::vector<std::vector<float>> &pop){
     pcl::search::KdTree<pcl::PointXYZ>::Ptr tree(new pcl::search::KdTree<pcl::PointXYZ>);
     tree->setInputCloud (sky5);  //KdTree 생성
     std::vector<pcl::PointIndices> cluster_indices;       // 군집화된 결과물의 Index 저장, 다중 군집화 객체는 cluster_indices[0] 순으로 저장
@@ -177,18 +190,18 @@ void clustering(pcl::PointCloud<pcl::PointXYZ>::Ptr sky5, pcl::PointCloud<pcl::P
 
     for (size_t i = 0; i < cluster_indices.size(); ++i) {
         // 하나의 군집에 대해 min/max 값을 구하기 위해 포인트 클라우드 동적 할당
-        pcl::PointCloud<pcl::PointXYZ>::Ptr sky7(new pcl::PointCloud<pcl::PointXYZ>);
+        pcl::PointCloud<pcl::PointXYZ>::Ptr sky6_6(new pcl::PointCloud<pcl::PointXYZ>);
 
-        // 해당 군집에 속한 점들을 sky7에 추가
+        // 해당 군집에 속한 점들을 sky6_6에 추가
         for (size_t j = 0; j < cluster_indices[i].indices.size(); ++j) {
             int idx = cluster_indices[i].indices[j];
-            sky7->points.push_back(sky5->points[idx]);  // sky6에서 해당 인덱스의 점을 추가
+            sky6_6->points.push_back(sky5->points[idx]);  // sky6에서 해당 인덱스의 점을 추가
         }
 
         pcl::PointXYZ min_point, max_point;
 
-        // sky7에서 min/max 값을 구함
-        pcl::getMinMax3D(*sky7, min_point, max_point);
+        // 6_6에서 min/max 값을 구함
+        pcl::getMinMax3D(*sky6_6, min_point, max_point);
 
         // x, y 크기 계산하여 pop[i][0]과 pop[i][1]에 저장
         pop[i][0] = max_point.x - min_point.x;
@@ -199,55 +212,92 @@ void clustering(pcl::PointCloud<pcl::PointXYZ>::Ptr sky5, pcl::PointCloud<pcl::P
     // 결과를 정리cmka
     sky6->width = sky6->points.size();
     sky6->height = 1;
-    sky6->is_dense = true;
+    sky6->is_dense = true; 
+}
 
-    int o_x;
-    for (int i=0;i<sky6->points.size();i++){
-        o_x=0;
-        for(int j=i+1;j<sky6->points.size();j++){
-            if(std::sqrt((sky6->points[i].x-sky6->points[j].x)*(sky6->points[i].x-sky6->points[j].x) + (sky6->points[i].y-sky6->points[j].y)*(sky6->points[i].y-sky6->points[j].y))<=10){
-                pcl::PointCloud<pcl::PointXYZ>::Ptr sky6_8(new pcl::PointCloud<pcl::PointXYZ>);//sky6_8은 해당 거리값 이내에 있는 코어포인트 합치는 용도
-                int i_n=0;
-                int j_n=0;
-                for(int u=0;u<i;u++){
-                    i_n+=a1[u];
+void merging(std::vector<objif> &ob , pcl::PointCloud<pcl::PointXYZ>::Ptr sky5,int d){
+    const float DISTANCE = 2.25;
+    bool merged;
+    do{
+        merged=false;
+        for(std::vector<objif>::iterator it=ob.begin();it != ob.end() ; ++it){
+            bool again=false;
+            for(std::vector<objif>::iterator it2=it+1;it2 != obj.end();++it2){
+                bool shouldMerge=false;
+                float dx=(*it).core_x - (*it2).core_x;
+                float dy=(*it).core_y - (*it2).core_y;
+                float dist=sqrt(dx*dx+dy*dy);
+                if(dist<= DISTANCE){
+                   const std::vector<int> &indices1 =(*it).objPoints->indices;
+                   const std::vector<int> &indices2 =(*it2).objPoints->indices;
+                   const std::vector<pcl::PointXYZ> &points = sky5->points;
+                   for(int i : indices1){
+                        const pcl::PointCloud<pcl::PointXYZ> &PP=points[i];
+                        for(int i2 : indices2){
+                            const pcl::PointCloud<pcl::PointXYZ> &PP2=points[i2];
+                            float pdx = PP.x - PP2.x;
+                            float pdy = PP.y - PP2.y;
+                            if ((pdx * pdx + pdy * pdy) <= (d * d)) {
+                                shouldMerge = true;
+                                break;
+                            }
+                        }
+                        if(shouldMerge) break;
+                   }
                 }
+                if(shouldMerge) {
+                    (*it).xMin = std::min((*it).xMin, (*it2).xMin);
+                    (*it).yMin = std::min((*it).yMin, (*it2).yMin);
+                    (*it).zMin = std::min((*it).zMin, (*it2).zMin);
+                    (*it).xMax = std::max((*it).xMax, (*it2).xMax);
+                    (*it).yMax = std::max((*it).yMax, (*it2).yMax);
+                    (*it).zMax = std::max((*it).zMax, (*it2).zMax);
+                    (*it).core_x = ((*it).xMin + (*it).xMax) / 2;//요거 다시 수정,,,해당 군집포인트들 다 합쳐서 평균 낼 예정
+                    (*it).core_y = ((*it).yMin + (*it).yMax) / 2;
+                    (*it).core_z = ((*it).zMin + (*it).zMax) / 2;
 
-                for(int u=0;u<j;u++){
-                    j_n+=a1[u];
+                    // 포인트 인덱스 병합
+                    (*iit).objPoints->indices.insert((*it).objPoints->indices.end(), 
+                                                     (*it2).objPoints->indices.begin(), 
+                                                     (*it2).objPoints->indices.end());
+
+                    it2 = objs.erase(it2); // 벡터에서 삭제 후 다음 클러스터로
+                    merged = true; // 병합이 일어났음을 표시
+                    again=true;
                 }
-
-                for(int u=i_n;u<=i_n+a1[i];u++){
-                    sky6_8->points.push_back(allClusters->points[i_n]);
-                }
-
-                for(int u=j_n;u<=j_n+a1[j];u++){
-                    sky6_8->points.push_back(allClusters->points[j_n]);
-                }
-
-                pcl::PointXYZ new_centroid(0.0, 0.0, 0.0);
-                for(int w=0;w<sky6_8->points.size();w++){
-                    new_centroid.x += sky6_8->points[w].x;
-                    new_centroid.y += sky6_8->points[w].y;
-                    new_centroid.z += sky6_8->points[w].z;
-                }
-
-                new_centroid.x /=sky6_8->points.size();
-                new_centroid.y /=sky6_8->points.size();
-                new_centroid.z /=sky6_8->points.size();
-
-                sky8->points.push_back(new_centroid);
-                o_x=1;
-                break;
-                //중심점 구하고 추가후 반복문 나오기
             }
-
+            if(again){
+                it=ob.begin();
+            }
         }
+    }while(merged);
+}
 
-        if(o_x==0){
-            sky8->points.push_back(sky6->points[i]);
+void objectinfo_save(pcl::PointCloud<pcl::PointXYZ>::Ptr sky5,pcl::PointCloud<pcl::PointXYZ>::Ptr sky6,std::vector<pcl::PointIndices> cluster_indices,pcl::PointCloud<pcl::PointXYZ>::Ptr sky7){
+    std::vector<objif> object;
+    pair<float, float> x(std::numeric_limits<float>::max(), std::numeric_limits<float>::lowest()); 
+    //x.first에는 최솟값을, x.second에는 최댓값을 저장
+    pair<float,float>y(std::numeric_limits<float>::max(),std::numeric_limits<float>::lowest());
+    pair<float, float> z(std::numeric_limits<float>::max(), std::numeric_limits<float>::lowest()); 
+
+    for(std::vector<pcl::PointIndices>::iterator it = cluster_indices.begin();it != cluster_indices.end(); ++it){
+        for(std::vector<int>::iterator it2 = it->indices.begin();it2 != it->indices.end();++it2){
+            if(x.first>sky5->points[*it2].x) x.first=sky5->points[*it2].x;
+            if(x.second<sky5->points[*it2].x) x.second=sky5->points[*it2].x;
+            if(y.first>sky5->points[*it2].y) y.first=sky5->points[*it2].y;
+            if(y.second<sky5->points[*it2].y) y.second=sky5->points[*it2].y;
+            if(z.first>sky5->points[*it2].z) z.first=sky5->points[*it2].z;
+            if(z.second<sky5->points[*it2].z) z.second=sky5->points[*it2].z;
         }
+        
+        
+        objif before_ob={&(*it),sky6->points[*it].x,sky6->points[*it].y,sky6->points[*it].z,
+                           x.first,y.first,z.first,x.second,y.second,z.second }
+
+        object.push_back(before_ob);
     }
+    //여기서부터는 병합
+
 }
 
 // 콜백 함수
@@ -274,12 +324,12 @@ void pointCloudCallback(const sensor_msgs::PointCloud2::ConstPtr& input_msg) {
     // ROS_INFO("Normal Vector Filtering Completed");
 
     std::vector<std::vector<float>>xy;
-    clustering(ransac_cloud,clustering_cloud,xy,final_cloud);
+    clustering(ransac_cloud,clustering_cloud,xy);
     ROS_INFO("CLustering Completed");
 
     // 6. PCL 데이터를 ROS 메시지로 변환
     sensor_msgs::PointCloud2 output_msg;
-    pcl::toROSMsg(*final_cloud, output_msg);
+    pcl::toROSMsg(*clustering_cloud, output_msg);
     output_msg.header = input_msg->header;  // 입력 메시지의 헤더를 유지
 
     sensor_msgs::PointCloud2 output_msg2;
