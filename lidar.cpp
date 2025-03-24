@@ -10,13 +10,22 @@
 #include <pcl/segmentation/extract_clusters.h>
 #include <cmath>
 #include <vector>
-#include <project/points.h>
+#include <filter/points.h>
 
 using namespace std;
 
 ros::Publisher pub;
 ros::Publisher pub2;
 ros::Publisher pub_custom;
+
+// 최대 저장할 프레임 수
+const int MAX_FRAMES = 10;
+//전프레임의 코어포인트
+std::deque<pcl::PointCloud<pcl::PointXYZ>::Ptr> prevCentroids;
+//전프레임의 시간
+ros::Time prevTime;
+//현프레임의 시간
+ros::Time currTime;
 
 struct objif{
     pcl::PointIndices* objPoints;
@@ -29,7 +38,7 @@ struct objif{
     float xMax;
     float yMax;
     float zMax;
-}
+};
 
 // ROI 필터링
 void ROI(pcl::PointCloud<pcl::PointXYZ>::Ptr sky, pcl::PointCloud<pcl::PointXYZ>::Ptr sky2) {
@@ -57,7 +66,7 @@ void normalVectorFiltering(pcl::PointCloud<pcl::PointXYZ>::Ptr sky4, pcl::PointC
     pcl::PointIndices::Ptr inliers(new pcl::PointIndices());
     pcl::PointIndices::Ptr wall_inliers(new pcl::PointIndices());  // 벽면 점을 추적하는 변수
     pcl::PointCloud<pcl::PointXYZ>::Ptr sky4_5(new pcl::PointCloud<pcl::PointXYZ>(*sky4));
-    int max_iterations = 50; // 최대 반복 횟수
+    int max_iterations = 100; // 최대 반복 횟수
     int iteration = 0;
     
     // RANSAC 세그멘테이션 반복
@@ -68,7 +77,7 @@ void normalVectorFiltering(pcl::PointCloud<pcl::PointXYZ>::Ptr sky4, pcl::PointC
         seg.setModelType(pcl::SACMODEL_PLANE);
         seg.setMethodType(pcl::SAC_RANSAC);
         seg.setMaxIterations(1000);
-        seg.setDistanceThreshold(0.3);  // 허용 거리 20cm
+        seg.setDistanceThreshold(0.5);  // 허용 거리 20cm
         seg.setInputCloud(sky4);
         seg.segment(*inliers, *coefficients);
 
@@ -90,7 +99,7 @@ void normalVectorFiltering(pcl::PointCloud<pcl::PointXYZ>::Ptr sky4, pcl::PointC
 
                 // 지면을 제거: sky4에서 해당 inliers 점들을 제거
                 pcl::ExtractIndices<pcl::PointXYZ> extract;
-                extract.setInputCloud(sky4);
+                extract.setInputCloud(sky4_5);
                 extract.setIndices(inliers);
                 extract.setNegative(true); // true로 설정하면 inliers 외 점들만 남김
                 extract.filter(*sky4_5);
@@ -118,7 +127,8 @@ void normalVectorFiltering(pcl::PointCloud<pcl::PointXYZ>::Ptr sky4, pcl::PointC
     }
 }
 
-void clustering(pcl::PointCloud<pcl::PointXYZ>::Ptr sky5, pcl::PointCloud<pcl::PointXYZ>::Ptr sky6,std::vector<std::vector<float>> &pop){
+void clustering(pcl::PointCloud<pcl::PointXYZ>::Ptr sky5, pcl::PointCloud<pcl::PointXYZ>::Ptr sky6,
+std::vector<std::vector<float>> &pop,std::vector<pcl::PointIndices> &all_cluster_indices ){
     pcl::search::KdTree<pcl::PointXYZ>::Ptr tree(new pcl::search::KdTree<pcl::PointXYZ>);
     tree->setInputCloud (sky5);  //KdTree 생성
     std::vector<pcl::PointIndices> cluster_indices;       // 군집화된 결과물의 Index 저장, 다중 군집화 객체는 cluster_indices[0] 순으로 저장
@@ -131,7 +141,7 @@ void clustering(pcl::PointCloud<pcl::PointXYZ>::Ptr sky5, pcl::PointCloud<pcl::P
     ec.setSearchMethod (tree);      // 위에서 정의한 탐색 방법 지정
     ec.extract (cluster_indices);   // 군집화 적용
     cout << "Number of clusters found: " << cluster_indices.size() << std::endl;
-
+    all_cluster_indices=cluster_indices;
     if (cluster_indices.size()==0) {
             cout << "No clusters found. Continuing with empty result." << std::endl;
             //예시: 기본적인 빈 포인트 추가
@@ -140,10 +150,7 @@ void clustering(pcl::PointCloud<pcl::PointXYZ>::Ptr sky5, pcl::PointCloud<pcl::P
             pop.clear();
             return;
     }
-
-    pcl::PointCloud<pcl::PointXYZ>::Ptr allClusters(new pcl::PointCloud<pcl::PointXYZ>);
-    std::vector<pcl::PointXYZ> clusterPoints; //한 군집에 속한 모든 포인트들
-    std::vector<float> a1;
+    
     int counting=0;
 
     for (std::vector<pcl::PointIndices>::iterator cluster_it = cluster_indices.begin(); cluster_it != cluster_indices.end(); ++cluster_it) {
@@ -153,22 +160,16 @@ void clustering(pcl::PointCloud<pcl::PointXYZ>::Ptr sky5, pcl::PointCloud<pcl::P
             centroid.x += sky5->points[*point_it].x;
             centroid.y += sky5->points[*point_it].y;
             centroid.z += sky5->points[*point_it].z;
-            clusterPoints.push_back(sky5->points[*point_it]);
+            
         }
         centroid.x /= cluster_it->indices.size();
         centroid.y /= cluster_it->indices.size();
         centroid.z /= cluster_it->indices.size();
-        if(centroid.z<-0.6){
-            continue;
-        }
-        // 코어 포인트를 최종 클러스터 점군에 추가
+        //if(centroid.z<-0.6){
+            //continue;
+        //}// 풀 같은 지면제거 후에 남은 노이즈 제거하기 위한 조건문
+        // 코어 포인트를 최종 클러스터 점군에 추가 // 현재 병합과정으로 인해 삭제함
         sky6->points.push_back(centroid);
-        for(int i=0;i<clusterPoints.size();i++){
-            allClusters->points.push_back(clusterPoints[i]);// 'sky6랑 인덱스값이 똑같은 곳에다가 해당 군집포인트들 넣기'가 의도였지만 allClusters->points.push_back은 "하나의 점"만 추가 되므로 실패
-        }
-        a1.push_back(clusterPoints.size());
-        clusterPoints.clear();
-        counting++;
 
     }
 
@@ -215,72 +216,89 @@ void clustering(pcl::PointCloud<pcl::PointXYZ>::Ptr sky5, pcl::PointCloud<pcl::P
     sky6->is_dense = true; 
 }
 
-void merging(std::vector<objif> &ob , pcl::PointCloud<pcl::PointXYZ>::Ptr sky5,int d){
-    const float DISTANCE = 2.25;
+void merge(std::vector<objif> &ob , pcl::PointCloud<pcl::PointXYZ>::Ptr sky5,int d){
+    const float DISTANCE = 4;
     bool merged;
-    do{
-        merged=false;
-        for(std::vector<objif>::iterator it=ob.begin();it != ob.end() ; ++it){
-            bool again=false;
-            for(std::vector<objif>::iterator it2=it+1;it2 != obj.end();++it2){
-                bool shouldMerge=false;
-                float dx=(*it).core_x - (*it2).core_x;
-                float dy=(*it).core_y - (*it2).core_y;
-                float dist=sqrt(dx*dx+dy*dy);
-                if(dist<= DISTANCE){
-                   const std::vector<int> &indices1 =(*it).objPoints->indices;
-                   const std::vector<int> &indices2 =(*it2).objPoints->indices;
-                   const std::vector<pcl::PointXYZ> &points = sky5->points;
-                   for(int i : indices1){
-                        const pcl::PointCloud<pcl::PointXYZ> &PP=points[i];
-                        for(int i2 : indices2){
-                            const pcl::PointCloud<pcl::PointXYZ> &PP2=points[i2];
-                            float pdx = PP.x - PP2.x;
-                            float pdy = PP.y - PP2.y;
-                            if ((pdx * pdx + pdy * pdy) <= (d * d)) {
-                                shouldMerge = true;
-                                break;
+        while(merged){
+            merged=false;
+            for(std::vector<objif>::iterator it=ob.begin();it != ob.end() ; ++it){
+                for(std::vector<objif>::iterator it2=it+1;it2 != ob.end();){
+                    bool shouldMerge=false;
+                    float dx=(*it).core_x - (*it2).core_x;
+                    float dy=(*it).core_y - (*it2).core_y;
+                    float dist=sqrt(dx*dx+dy*dy);
+                    if(dist<= DISTANCE){
+                        const std::vector<int> &indices1 =(*it).objPoints->indices;
+                        const std::vector<int> &indices2 =(*it2).objPoints->indices;
+                        const std::vector<pcl::PointXYZ, Eigen::aligned_allocator<pcl::PointXYZ>> &points = sky5->points;
+                        for(int i : indices1){
+                            const pcl::PointXYZ &PP=points[i];
+                            for(int i2 : indices2){
+                                const pcl::PointXYZ &PP2=points[i2];
+                                float pdx = PP.x - PP2.x;
+                                float pdy = PP.y - PP2.y;
+                                if ((pdx * pdx + pdy * pdy) <= (d * d)) {
+                                    shouldMerge = true;
+                                    break;
+                                }
                             }
+                            if(shouldMerge) break;
                         }
-                        if(shouldMerge) break;
-                   }
-                }
-                if(shouldMerge) {
-                    (*it).xMin = std::min((*it).xMin, (*it2).xMin);
-                    (*it).yMin = std::min((*it).yMin, (*it2).yMin);
-                    (*it).zMin = std::min((*it).zMin, (*it2).zMin);
-                    (*it).xMax = std::max((*it).xMax, (*it2).xMax);
-                    (*it).yMax = std::max((*it).yMax, (*it2).yMax);
-                    (*it).zMax = std::max((*it).zMax, (*it2).zMax);
-                    (*it).core_x = ((*it).xMin + (*it).xMax) / 2;//요거 다시 수정,,,해당 군집포인트들 다 합쳐서 평균 낼 예정
-                    (*it).core_y = ((*it).yMin + (*it).yMax) / 2;
-                    (*it).core_z = ((*it).zMin + (*it).zMax) / 2;
+                    }
+                    if(shouldMerge)
+                    {
+                        it->xMin = std::min(it->xMin, it2->xMin);
+                        it->yMin = std::min(it->yMin, it2->yMin);
+                        it->zMin = std::min(it->zMin, it2->zMin);
+                        it->xMax = std::max(it->xMax, it2->xMax);
+                        it->yMax = std::max(it->yMax, it2->yMax);
+                        it->zMax = std::max(it->zMax, it2->zMax);
+                        int totalPoints = it->objPoints->indices.size() +it2->objPoints->indices.size();
+                        float sumX = 0, sumY = 0, sumZ = 0;
+                        for (int i : it->objPoints->indices) {
+                            sumX += sky5->points[i].x;
+                            sumY += sky5->points[i].y;
+                            sumZ += sky5->points[i].z;
+                        }
+                        for (int i : it2->objPoints->indices) {
+                            sumX += sky5->points[i].x;
+                            sumY += sky5->points[i].y;
+                            sumZ += sky5->points[i].z;
+                        }
+                        it->core_x = sumX / totalPoints;
+                        it->core_y = sumY / totalPoints;
+                        it->core_z = sumZ / totalPoints;
 
-                    // 포인트 인덱스 병합
-                    (*iit).objPoints->indices.insert((*it).objPoints->indices.end(), 
+                        // 포인트 인덱스 병합
+                        (*it).objPoints->indices.insert((*it).objPoints->indices.end(), 
                                                      (*it2).objPoints->indices.begin(), 
                                                      (*it2).objPoints->indices.end());
 
-                    it2 = objs.erase(it2); // 벡터에서 삭제 후 다음 클러스터로
-                    merged = true; // 병합이 일어났음을 표시
-                    again=true;
+                        it2 = ob.erase(it2); // 벡터에서 삭제 후 다음 클러스터로
+                        merged = true; // 병합이 일어났음을 표시
+                        break;
+                    } else{
+                        ++it2;
+                    }
                 }
+                if (merged) break;
             }
-            if(again){
-                it=ob.begin();
-            }
+            
         }
-    }while(merged);
+        //std::cout<<"completed"<<endl;
+    
+    
 }
 
-void objectinfo_save(pcl::PointCloud<pcl::PointXYZ>::Ptr sky5,pcl::PointCloud<pcl::PointXYZ>::Ptr sky6,std::vector<pcl::PointIndices> cluster_indices,pcl::PointCloud<pcl::PointXYZ>::Ptr sky7){
-    std::vector<objif> object;
+void objectinfo_save(std::vector<objif> &object,pcl::PointCloud<pcl::PointXYZ>::Ptr sky5,pcl::PointCloud<pcl::PointXYZ>::Ptr sky6,
+std::vector<pcl::PointIndices> all_cluster_indices,pcl::PointCloud<pcl::PointXYZ>::Ptr sky7){
     pair<float, float> x(std::numeric_limits<float>::max(), std::numeric_limits<float>::lowest()); 
     //x.first에는 최솟값을, x.second에는 최댓값을 저장
     pair<float,float>y(std::numeric_limits<float>::max(),std::numeric_limits<float>::lowest());
     pair<float, float> z(std::numeric_limits<float>::max(), std::numeric_limits<float>::lowest()); 
+    int centroid_index =0;
 
-    for(std::vector<pcl::PointIndices>::iterator it = cluster_indices.begin();it != cluster_indices.end(); ++it){
+    for(std::vector<pcl::PointIndices>::iterator it = all_cluster_indices.begin();it != all_cluster_indices.end(); ++it){
         for(std::vector<int>::iterator it2 = it->indices.begin();it2 != it->indices.end();++it2){
             if(x.first>sky5->points[*it2].x) x.first=sky5->points[*it2].x;
             if(x.second<sky5->points[*it2].x) x.second=sky5->points[*it2].x;
@@ -291,14 +309,60 @@ void objectinfo_save(pcl::PointCloud<pcl::PointXYZ>::Ptr sky5,pcl::PointCloud<pc
         }
         
         
-        objif before_ob={&(*it),sky6->points[*it].x,sky6->points[*it].y,sky6->points[*it].z,
-                           x.first,y.first,z.first,x.second,y.second,z.second }
+        objif before_ob={&(*it),sky6->points[centroid_index].x,sky6->points[centroid_index].y,sky6->points[centroid_index].z,
+                           x.first,y.first,z.first,x.second,y.second,z.second };
 
         object.push_back(before_ob);
+        centroid_index++;
     }
-    //여기서부터는 병합
-
+    
+    if(object.size()>=2){
+        merge(object,sky5,3);
+        for(int i=0;i<object.size();i++){
+            pcl::PointXYZ core;
+            core.x=object[i].core_x;
+            core.y=object[i].core_y;
+            core.z=object[i].core_z;
+            sky7->points.push_back(core);
+        }
+    }
+    else{
+        pcl::PointXYZ core={1,1,1};
+        sky7->points.push_back(core);
+    }
 }
+
+double calculateEuclideanDistance(const pcl::PointXYZ& point1, const pcl::PointXYZ& point2) {
+    double dx = point1.x - point2.x;
+    double dy = point1.y - point2.y;
+    double dz = point1.z - point2.z;
+    return std::sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+double calculateSpeed(const pcl::PointXYZ& prevPoint, const pcl::PointXYZ& currPoint, double timeInterval) {
+    double distance = calculateEuclideanDistance(prevPoint, currPoint);  // 두 점 사이의 거리
+    return distance / timeInterval;  // 속도 계산 (거리 / 시간)
+}
+
+// 전/현재 프레임 군집 중심점 비교 함수
+void compareCentroids(const pcl::PointCloud<pcl::PointXYZ>::Ptr& prevCentroids,
+                      const pcl::PointCloud<pcl::PointXYZ>::Ptr& currCentroids,double time) {
+    for (size_t i = 0; i < prevCentroids->points.size(); ++i) {
+        for (size_t j = 0; j < currCentroids->points.size(); ++j) {
+            double distance = calculateEuclideanDistance(prevCentroids->points[i], currCentroids->points[j]);
+
+            // 5cm 이내일 경우 같은 군집으로 판단하고 속도 계산
+            if (distance < 0.05) {  // 5cm 이내
+                double speed = calculateSpeed(prevCentroids->points[i], currCentroids->points[j], time);  // 0.1초 간격
+                std::cout << "Speed: " << speed << " m/s" << std::endl;
+            }
+        }
+    }
+}
+
+// 두 군집 중심점 간의 속도 계산 함수
+
+
 
 // 콜백 함수
 void pointCloudCallback(const sensor_msgs::PointCloud2::ConstPtr& input_msg) {
@@ -324,12 +388,32 @@ void pointCloudCallback(const sensor_msgs::PointCloud2::ConstPtr& input_msg) {
     // ROS_INFO("Normal Vector Filtering Completed");
 
     std::vector<std::vector<float>>xy;
-    clustering(ransac_cloud,clustering_cloud,xy);
+    std::vector<pcl::PointIndices> all_cluster_indices;
+    clustering(ransac_cloud,clustering_cloud,xy,all_cluster_indices);
     ROS_INFO("CLustering Completed");
+
+    std::vector<objif> object;
+    objectinfo_save(object,ransac_cloud,clustering_cloud,all_cluster_indices,final_cloud);
+
+    if (!prevCentroids.empty()) {
+        double time=(currTime-prevTime).toSec();
+        compareCentroids(prevCentroids.back(), clustering_cloud,time);
+    }
+
+    // 이전 프레임 리스트에 새로운 프레임 추가
+    prevCentroids.push_back(clustering_cloud);
+
+    prevTime=currTime;
+    currTime=input_msg->header.stamp;
+
+    // 최대 프레임 수를 초과하면 가장 오래된 프레임 삭제
+    if (prevCentroids.size() > MAX_FRAMES) {
+        prevCentroids.pop_front();  // 가장 오래된 프레임 제거
+    }
 
     // 6. PCL 데이터를 ROS 메시지로 변환
     sensor_msgs::PointCloud2 output_msg;
-    pcl::toROSMsg(*clustering_cloud, output_msg);
+    pcl::toROSMsg(*final_cloud, output_msg);
     output_msg.header = input_msg->header;  // 입력 메시지의 헤더를 유지
 
     sensor_msgs::PointCloud2 output_msg2;
@@ -343,11 +427,11 @@ void pointCloudCallback(const sensor_msgs::PointCloud2::ConstPtr& input_msg) {
     pub2.publish(output_msg2);
 
     if(!(clustering_cloud->points[0].x==0&&clustering_cloud->points[0].y==0&&clustering_cloud->points[0].z==0)){
-        project::points cloud_points;
+        filter::points cloud_points;
 
         // 클러스터의 각 점을 cloud_points.data에 저장하고 idx 값을 설정합니다.
         for (int i = 0; i < clustering_cloud->size(); i++) {
-            project::point tmp;
+            filter::point tmp;
             tmp.x = clustering_cloud->points[i].x;
             tmp.y = clustering_cloud->points[i].y;
             tmp.z = clustering_cloud->points[i].z;
@@ -360,6 +444,7 @@ void pointCloudCallback(const sensor_msgs::PointCloud2::ConstPtr& input_msg) {
             }
             cloud_points.data.push_back(tmp);
         }
+        
 
         // 점들을 거리 순으로 정렬 (버블 정렬)
         for (int i = 0; i < cloud_points.data.size() - 1; i++) {
@@ -374,7 +459,7 @@ void pointCloudCallback(const sensor_msgs::PointCloud2::ConstPtr& input_msg) {
                        cloud_points.data[j + 1].z * cloud_points.data[j + 1].z;
                 // 거리 비교 후 점 스왑
                 if (distance1 > distance2) {
-                    project::point temp = cloud_points.data[j];
+                    filter::point temp = cloud_points.data[j];
                     cloud_points.data[j] = cloud_points.data[j + 1];
                     cloud_points.data[j + 1] = temp;
                 }
@@ -385,14 +470,12 @@ void pointCloudCallback(const sensor_msgs::PointCloud2::ConstPtr& input_msg) {
 
         cloud_points.num="number of total core points";
 
-        //거리값 계산이랑 roi y=0인 구간에서 발견된 코어 포인트 따로 정리
-
         pub_custom.publish(cloud_points);
     }
 
     else{
-        project::points cloud_points;
-        project::point tmp;
+        filter::points cloud_points;
+        filter::point tmp;
         cloud_points.s=0;
         cloud_points.num="number of total core points";
         tmp.x = 0;
@@ -418,8 +501,8 @@ int main(int argc, char** argv) {
     // Publisher: 필터링된 PointCloud2 출력
     pub = nh.advertise<sensor_msgs::PointCloud2>("/filtered_lidar3D", 10);
     pub2 = nh.advertise<sensor_msgs::PointCloud2>("/ransac_lidar3D", 10);
-    pub_custom = nh.advertise<project::points>("/lidar3d_custom", 10);
-
+    pub_custom = nh.advertise<filter::points>("/lidar3d_custom", 10);
+    
     // ros::spin();
     while (ros::ok())
     {
