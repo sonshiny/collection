@@ -1,0 +1,8 @@
+prefix=/home/son/soon/maker/install
+
+Name: all_om
+Description: Description of all_om
+Version: 0.0.0
+Cflags: -I${prefix}/include
+Libs: -L${prefix}/lib 
+Requires: 

@@ -1,0 +1,9 @@
+int32 index
+float32 x
+float32 y
+float32 z
+float32 distance
+float32 degree
+int32 x_size
+int32 y_size
+string object

@@ -1,0 +1,2 @@
+all_om
+-DCATKIN_DEVEL_PREFIX=/home/son/soon/maker/devel -DCMAKE_INSTALL_PREFIX=/home/son/soon/maker/install -G Unix Makefiles
