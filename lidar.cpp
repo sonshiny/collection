@@ -10,6 +10,7 @@
 #include <pcl/segmentation/extract_clusters.h>
 #include <cmath>
 #include <vector>
+#include <Eigen/Dense>
 #include <filter/points.h>
 
 using namespace std;
@@ -38,6 +39,7 @@ struct objif{
     float xMax;
     float yMax;
     float zMax;
+    
 };
 
 // ROI 필터링
@@ -344,7 +346,20 @@ double calculateSpeed(const pcl::PointXYZ& prevPoint, const pcl::PointXYZ& currP
     return distance / timeInterval;  // 속도 계산 (거리 / 시간)
 }
 
-// 전/현재 프레임 군집 중심점 비교 함수
+void direction(const pcl::PointXYZ& prevPoint, const pcl::PointXYZ& currPoint) {
+    double dx = prevPoint.x - currPoint.x;
+    double dy = prevPoint.y - currPoint.y;
+    double dz = prevPoint.z - currPoint.z;
+    double distance=std::sqrt(dx * dx + dy * dy + dz * dz);
+    double dir_x = (prevPoint.x - currPoint.x)/distance;
+    double dir_y = (prevPoint.y - currPoint.y)/distance;
+    double dir_z = (prevPoint.z - currPoint.z)/distance;
+    cout<<"direction of x: "<<dir_x<<endl;
+    cout<<"direction of y: "<<dir_y<<endl;
+    cout<<"direction of z: "<<dir_z<<endl;
+}
+
+// 전/현재 프레임 군집 중심점 비교 후 속도 가속도 방향 구하는 함수
 void compareCentroids(const pcl::PointCloud<pcl::PointXYZ>::Ptr& prevCentroids,
                       const pcl::PointCloud<pcl::PointXYZ>::Ptr& currCentroids,double time) {
     for (size_t i = 0; i < prevCentroids->points.size(); ++i) {
@@ -352,9 +367,13 @@ void compareCentroids(const pcl::PointCloud<pcl::PointXYZ>::Ptr& prevCentroids,
             double distance = calculateEuclideanDistance(prevCentroids->points[i], currCentroids->points[j]);
 
             // 5cm 이내일 경우 같은 군집으로 판단하고 속도 계산
-            if (distance < 0.05) {  // 5cm 이내
+            if (distance < 0.05) {  // 5cm 이내 but 이거는 잘 안나오면 조절해야 되는 파라 미터
                 double speed = calculateSpeed(prevCentroids->points[i], currCentroids->points[j], time);  // 0.1초 간격
                 std::cout << "Speed: " << speed << " m/s" << std::endl;
+                double accelation= speed / time ;
+                std::cout << "Accelation: " << speed << " m/s" << std::endl;
+                direction(prevCentroids->points[i],currCentroids->points[j]);
+
             }
         }
     }
