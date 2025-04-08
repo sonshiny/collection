@@ -12,6 +12,7 @@
 #include <vector>
 #include <Eigen/Dense>
 #include <filter/points.h>
+#include <sensor_msgs/Imu.h>
 
 using namespace std;
 
@@ -19,16 +20,14 @@ ros::Publisher pub;
 ros::Publisher pub2;
 ros::Publisher pub_custom;
 
-// 최대 저장할 프레임 수
-const int MAX_FRAMES = 10;
-//전프레임의 코어포인트
-std::deque<pcl::PointCloud<pcl::PointXYZ>::Ptr> prevCentroids;
+const int MAX_FRAMES = 5;
+int speed_counter=0; //속도값 갯수
 //전프레임의 시간
 ros::Time prevTime;
 //현프레임의 시간
 ros::Time currTime;
 
-struct objif{
+struct objif {
     pcl::PointIndices* objPoints;
     float core_x;
     float core_y;
@@ -39,8 +38,14 @@ struct objif{
     float xMax;
     float yMax;
     float zMax;
-    
+
+    float velocity;
+    float acceleration;
+
+    float dir_x;
+    float dir_y;
 };
+std::deque<std::vector<objif>> prev_objects_queue;
 
 // ROI 필터링
 void ROI(pcl::PointCloud<pcl::PointXYZ>::Ptr sky, pcl::PointCloud<pcl::PointXYZ>::Ptr sky2) {
@@ -137,7 +142,7 @@ std::vector<std::vector<float>> &pop,std::vector<pcl::PointIndices> &all_cluster
     // 군집화 오브젝트 생성
     pcl::EuclideanClusterExtraction<pcl::PointXYZ> ec;
     ec.setInputCloud (sky5);       // 입력
-    ec.setClusterTolerance (0.5);  // 5cm
+    ec.setClusterTolerance (2);  // 5cm
     ec.setMinClusterSize (10);     // 최소 포인트 수 / 풀숲에 영향을 줌
     ec.setMaxClusterSize (10000);   // 최대 포인트 수
     ec.setSearchMethod (tree);      // 위에서 정의한 탐색 방법 지정
@@ -153,7 +158,6 @@ std::vector<std::vector<float>> &pop,std::vector<pcl::PointIndices> &all_cluster
             return;
     }
     
-    int counting=0;
 
     for (std::vector<pcl::PointIndices>::iterator cluster_it = cluster_indices.begin(); cluster_it != cluster_indices.end(); ++cluster_it) {
         pcl::PointXYZ centroid(0.0, 0.0, 0.0);
@@ -183,11 +187,11 @@ std::vector<std::vector<float>> &pop,std::vector<pcl::PointIndices> &all_cluster
             pop.clear();
             return;
     }
-
+    int counting=0;
     int numClusters = cluster_indices.size();
     pop.resize(numClusters);  // 군집 수만큼 외부 벡터 크기 설정
 
-    for (size_t i = 0; i < numClusters; ++i) {
+    for (size_t i = 0; i < numClusters; ++i) {int counting=0;
         pop[i].resize(2);  // 각 군집에 대해 내부 벡터 크기(2) 설정 (x, y 크기)
     }
 
@@ -292,8 +296,68 @@ void merge(std::vector<objif> &ob , pcl::PointCloud<pcl::PointXYZ>::Ptr sky5,int
     
 }
 
-void objectinfo_save(std::vector<objif> &object,pcl::PointCloud<pcl::PointXYZ>::Ptr sky5,pcl::PointCloud<pcl::PointXYZ>::Ptr sky6,
-std::vector<pcl::PointIndices> all_cluster_indices,pcl::PointCloud<pcl::PointXYZ>::Ptr sky7){
+
+/*void kalman_filter_update(objif &obj, float measured_x, float measured_y, float dt) {
+    const int state_size = 4;  // [x, y, vx, vy]
+    const int meas_size = 2;   // [x, y]
+
+    // 상태 전이 행렬 At
+    Eigen::MatrixXf A = Eigen::MatrixXf::Identity(state_size, state_size);
+    A(0, 2) = dt;  // x += vx * dt
+    A(1, 3) = dt;  // y += vy * dt
+
+    // 측정 행렬 H
+    Eigen::MatrixXf H = Eigen::MatrixXf::Zero(meas_size, state_size);
+    H(0, 0) = 1;  // x 측정값 사용
+    H(1, 1) = 1;  // y 측정값 사용
+
+    // 프로세스 잡음 공분산 Q
+    Eigen::MatrixXf Q = Eigen::MatrixXf::Identity(state_size, state_size) * 0.01f;
+
+    // 측정 잡음 공분산 R
+    Eigen::MatrixXf R = Eigen::MatrixXf::Identity(meas_size, meas_size) * 0.1f;
+
+    // 측정값 z
+    Eigen::VectorXf z(meas_size);
+    z << measured_x, measured_y;
+
+    // Kalman 필터 상태 벡터 초기화
+    if (!obj.kf_initialized) {
+        obj.kf_state = Eigen::VectorXf::Zero(state_size);
+        obj.kf_state.head(2) = z;  // x, y
+        obj.kf_P = Eigen::MatrixXf::Identity(state_size, state_size);
+        obj.kf_initialized = true;
+        return;
+    }
+
+    // 예측 단계
+    Eigen::VectorXf x_pred = A * obj.kf_state;
+    Eigen::MatrixXf P_pred = A * obj.kf_P * A.transpose() + Q;
+
+    // 업데이트 단계
+    Eigen::VectorXf y = z - H * x_pred;
+    Eigen::MatrixXf S = H * P_pred * H.transpose() + R;
+    Eigen::MatrixXf K = P_pred * H.transpose() * S.inverse();
+
+    obj.kf_state = x_pred + K * y;
+    obj.kf_P = (Eigen::MatrixXf::Identity(state_size, state_size) - K * H) * P_pred;
+
+    // 결과 반영
+    obj.core_x = obj.kf_state(0);
+    obj.core_y = obj.kf_state(1);
+
+    float vx = obj.kf_state(2);
+    float vy = obj.kf_state(3);
+    obj.velocity = std::sqrt(vx * vx + vy * vy);
+    obj.dir_x = vx / (obj.velocity + 1e-6f);  // 0 나눗셈 방지용
+    obj.dir_y = vy / (obj.velocity + 1e-6f);
+}*/
+
+
+
+/*void objectinfo_save(std::vector<objif> &object,pcl::PointCloud<pcl::PointXYZ>::Ptr sky5,pcl::PointCloud<pcl::PointXYZ>::Ptr sky6,
+std::vector<pcl::PointIndices> all_cluster_indices,pcl::PointCloud<pcl::PointXYZ>::Ptr sky7,
+std::vector<objif> &prev_objects){
     pair<float, float> x(std::numeric_limits<float>::max(), std::numeric_limits<float>::lowest()); 
     //x.first에는 최솟값을, x.second에는 최댓값을 저장
     pair<float,float>y(std::numeric_limits<float>::max(),std::numeric_limits<float>::lowest());
@@ -319,7 +383,7 @@ std::vector<pcl::PointIndices> all_cluster_indices,pcl::PointCloud<pcl::PointXYZ
     }
     
     if(object.size()>=2){
-        merge(object,sky5,3);
+        //merge(object,sky5,3);
         for(int i=0;i<object.size();i++){
             pcl::PointXYZ core;
             core.x=object[i].core_x;
@@ -332,52 +396,109 @@ std::vector<pcl::PointIndices> all_cluster_indices,pcl::PointCloud<pcl::PointXYZ
         pcl::PointXYZ core={1,1,1};
         sky7->points.push_back(core);
     }
+}*/
+
+
+void objectinfo_for_km(std::vector<objif> &now_object,
+                       const pcl::PointCloud<pcl::PointXYZ>::Ptr &sky5,
+                       const pcl::PointCloud<pcl::PointXYZ>::Ptr &sky6,
+                        std::vector<pcl::PointIndices> all_cluster_indices) {
+    
+    now_object.clear();
+    int centroid_index = 0;
+
+    for (int i = 0; i < all_cluster_indices.size(); i++) {
+        pcl::PointIndices cluster = all_cluster_indices[i];
+
+        float xMin = std::numeric_limits<float>::max();
+        float yMin = std::numeric_limits<float>::max();
+        float zMin = std::numeric_limits<float>::max();
+        float xMax = std::numeric_limits<float>::lowest();
+        float yMax = std::numeric_limits<float>::lowest();
+        float zMax = std::numeric_limits<float>::lowest();
+
+        for (int j = 0; j < cluster.indices.size(); j++) {
+            int idx = cluster.indices[j];
+            const pcl::PointXYZ &pt = sky5->points[idx];
+            xMin = std::min(xMin, pt.x);
+            yMin = std::min(yMin, pt.y);
+            zMin = std::min(zMin, pt.z);
+            xMax = std::max(xMax, pt.x);
+            yMax = std::max(yMax, pt.y);
+            zMax = std::max(zMax, pt.z);
+        }
+
+        pcl::PointXYZ centroid = sky6->points[centroid_index];
+        centroid_index++;
+
+        objif current_obj;
+        current_obj.objPoints = &all_cluster_indices[i];
+        current_obj.core_x = centroid.x;
+        current_obj.core_y = centroid.y;
+        current_obj.core_z = centroid.z;
+        current_obj.xMin = xMin;
+        current_obj.yMin = yMin;
+        current_obj.zMin = zMin;
+        current_obj.xMax = xMax;
+        current_obj.yMax = yMax;
+        current_obj.zMax = zMax;
+        current_obj.velocity = 0.0f;
+        current_obj.acceleration = 0.0f;
+        current_obj.dir_x = 0.0f;
+        current_obj.dir_y = 0.0f;
+        now_object.push_back(current_obj);
+    }
 }
 
-double calculateEuclideanDistance(const pcl::PointXYZ& point1, const pcl::PointXYZ& point2) {
-    double dx = point1.x - point2.x;
-    double dy = point1.y - point2.y;
-    double dz = point1.z - point2.z;
-    return std::sqrt(dx * dx + dy * dy + dz * dz);
-}
 
-double calculateSpeed(const pcl::PointXYZ& prevPoint, const pcl::PointXYZ& currPoint, double timeInterval) {
-    double distance = calculateEuclideanDistance(prevPoint, currPoint);  // 두 점 사이의 거리
+double calculateSpeed(const std::vector<objif>  &past_objects,int a, const std::vector<objif> &now_object,int b, double timeInterval) {
+    double dx=now_object[b].core_x - past_objects[a].core_x;
+    double dy=now_object[b].core_y - past_objects[a].core_y;
+    double distance = std::sqrt(dx * dx + dy * dy );// 두 점 사이의 거리
     return distance / timeInterval;  // 속도 계산 (거리 / 시간)
 }
 
-void direction(const pcl::PointXYZ& prevPoint, const pcl::PointXYZ& currPoint) {
-    double dx = prevPoint.x - currPoint.x;
-    double dy = prevPoint.y - currPoint.y;
-    double dz = prevPoint.z - currPoint.z;
-    double distance=std::sqrt(dx * dx + dy * dy + dz * dz);
-    double dir_x = (prevPoint.x - currPoint.x)/distance;
-    double dir_y = (prevPoint.y - currPoint.y)/distance;
-    double dir_z = (prevPoint.z - currPoint.z)/distance;
+void direction(const std::vector<objif>  &past_objects,int a, std::vector<objif> &now_object,int b) {
+    
+    double dx=now_object[b].core_x - past_objects[a].core_x;
+    double dy=now_object[b].core_y - past_objects[a].core_y;
+    double distance=std::sqrt(dx * dx + dy * dy );
+    double dir_x = (now_object[b].core_x - past_objects[a].core_x)/distance;
+    double dir_y = (now_object[b].core_y - past_objects[a].core_y)/distance;
     cout<<"direction of x: "<<dir_x<<endl;
     cout<<"direction of y: "<<dir_y<<endl;
-    cout<<"direction of z: "<<dir_z<<endl;
 }
 
 // 전/현재 프레임 군집 중심점 비교 후 속도 가속도 방향 구하는 함수
-void compareCentroids(const pcl::PointCloud<pcl::PointXYZ>::Ptr& prevCentroids,
-                      const pcl::PointCloud<pcl::PointXYZ>::Ptr& currCentroids,double time) {
-    for (size_t i = 0; i < prevCentroids->points.size(); ++i) {
-        for (size_t j = 0; j < currCentroids->points.size(); ++j) {
-            double distance = calculateEuclideanDistance(prevCentroids->points[i], currCentroids->points[j]);
+void compareCentroids(const std::deque<std::vector<objif>> &past_objects_queue,
+                      std::vector<objif> &now_object,double time) {
+
+    const std::vector<objif> &compare=past_objects_queue.back();
+
+    for (size_t i = 0; i < compare.size(); ++i) {
+        for (size_t j = 0; j < now_object.size(); ++j) {
+            double dx=now_object[i].core_x - compare[j].core_x;
+            double dy=now_object[i].core_y - compare[j].core_y;
+            double distance = std::sqrt(dx * dx + dy * dy );
 
             // 5cm 이내일 경우 같은 군집으로 판단하고 속도 계산
-            if (distance < 0.05) {  // 5cm 이내 but 이거는 잘 안나오면 조절해야 되는 파라 미터
-                double speed = calculateSpeed(prevCentroids->points[i], currCentroids->points[j], time);  // 0.1초 간격
-                std::cout << "Speed: " << speed << " m/s" << std::endl;
-                double accelation= speed / time ; // 근데 여기서 속도변화량을 구해야 하므로 따로 속도도 유지를 해야 하는 거임
-                std::cout << "Accelation: " << accelation << " m/s" << std::endl;
-                direction(prevCentroids->points[i],currCentroids->points[j]);
+            if (distance < 5) {  // 5cm 이내 but 이거는 잘 안나오면 조절해야 되는 파라 미터
+                double speed = calculateSpeed(compare,j, now_object,i, time);  // 0.1초 간격
+                now_object[i].velocity=speed;
+                std::cout<<"Speed:"<<speed<<endl;
+                speed_counter++;
+                if(speed_counter>=2){
+                    double accelation= fabs(now_object[i].velocity- compare[j].velocity) / time ; 
+                    std::cout<<"Accelation:"<<accelation<<endl;
+                }
+                
+                direction(compare,i, now_object,j);
 
             }
         }
     }
 }
+
 
 // 두 군집 중심점 간의 속도 계산 함수
 
@@ -400,45 +521,42 @@ void pointCloudCallback(const sensor_msgs::PointCloud2::ConstPtr& input_msg) {
 
     // 3. 복셀화 (Voxel Grid)
     voxel(filtered_cloud, boxeled_cloud);
-    // ROS_INFO("Voxel Filtering Completed");
-
-    // 5. 벡터 내적 필터링 (법선 벡터와 Z축 내적을 통해 지면 추출 및 제거)
+    // ROS_INFO("Voxel Filtering Completed");clustering_cloud
     normalVectorFiltering(boxeled_cloud, ransac_cloud);
-    // ROS_INFO("Normal Vector Filtering Completed");
-
     std::vector<std::vector<float>>xy;
     std::vector<pcl::PointIndices> all_cluster_indices;
     clustering(ransac_cloud,clustering_cloud,xy,all_cluster_indices);
     ROS_INFO("CLustering Completed");
 
     std::vector<objif> object;
-    objectinfo_save(object,ransac_cloud,clustering_cloud,all_cluster_indices,final_cloud);
+    double time = (currTime - prevTime).toSec();
+    std::cout << "Time interval between frames: " << (currTime - prevTime).toSec() << " seconds" << std::endl;
+    
+    objectinfo_for_km(object,ransac_cloud,clustering_cloud,all_cluster_indices);
 
-    if (!prevCentroids.empty()) {
+    if (!prev_objects_queue.empty()) {
         double time=(currTime-prevTime).toSec();
-        compareCentroids(prevCentroids.back(), clustering_cloud,time);
+        compareCentroids(prev_objects_queue,object,time);
     }
 
-    // 이전 프레임 리스트에 새로운 프레임 추가
-    prevCentroids.push_back(clustering_cloud);
+    prev_objects_queue.push_back(object);
+    prevTime = currTime;
+    currTime = input_msg->header.stamp;
 
-    prevTime=currTime;
-    currTime=input_msg->header.stamp;
-
-    // 최대 프레임 수를 초과하면 가장 오래된 프레임 삭제
-    if (prevCentroids.size() > MAX_FRAMES) {
-        prevCentroids.pop_front();  // 가장 오래된 프레임 제거
+    if (prev_objects_queue.size() > MAX_FRAMES) {
+        prev_objects_queue.pop_front();  // 가장 오래된 프레임 제거
     }
+
 
     // 6. PCL 데이터를 ROS 메시지로 변환
     sensor_msgs::PointCloud2 output_msg;
-    pcl::toROSMsg(*final_cloud, output_msg);
+    pcl::toROSMsg(*clustering_cloud, output_msg);
     output_msg.header = input_msg->header;  // 입력 메시지의 헤더를 유지
 
     sensor_msgs::PointCloud2 output_msg2;
     pcl::toROSMsg(*ransac_cloud, output_msg2);
     output_msg2.header = input_msg->header;  // 입력 메시지의 헤더를 유지
-
+ 
     // ROS_INFO("Received point cloud data");
 
     // 7. 필터링된 데이터를 발행
@@ -531,3 +649,4 @@ int main(int argc, char** argv) {
     return 0;
 
 }
+
