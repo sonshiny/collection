@@ -370,8 +370,8 @@ void compareCentroids(const pcl::PointCloud<pcl::PointXYZ>::Ptr& prevCentroids,
             if (distance < 0.05) {  // 5cm 이내 but 이거는 잘 안나오면 조절해야 되는 파라 미터
                 double speed = calculateSpeed(prevCentroids->points[i], currCentroids->points[j], time);  // 0.1초 간격
                 std::cout << "Speed: " << speed << " m/s" << std::endl;
-                double accelation= speed / time ;
-                std::cout << "Accelation: " << speed << " m/s" << std::endl;
+                double accelation= speed / time ; // 근데 여기서 속도변화량을 구해야 하므로 따로 속도도 유지를 해야 하는 거임
+                std::cout << "Accelation: " << accelation << " m/s" << std::endl;
                 direction(prevCentroids->points[i],currCentroids->points[j]);
 
             }
